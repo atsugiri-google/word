@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ドキュメントエディタ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- ドキュメントをdocx形式で生成するためのライブラリを読み込み -->
+    <script src="https://cdn.jsdelivr.net/npm/docx@5.0.0/build/docx.js"></script>
+    <!-- ファイルダウンロードのためのライブラリを読み込み -->
+    <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        .editor-container {
+            min-height: 80vh;
+            max-width: 800px;
+        }
+        .toolbar button {
+            transition: all 0.2s;
+        }
+        .toolbar button:hover {
+            transform: translateY(-2px);
+        }
+        .document-area:focus {
+            outline: none;
+        }
+        /* New CSS for image container and resizers */
+        .image-container {
+            position: relative;
+            display: inline-block;
+            cursor: pointer;
+        }
+        .resizer {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: #4a90e2;
+            border: 1px solid #fff;
+            box-shadow: 0 0 5px rgba(0,0,0,0.2);
+            z-index: 10;
+            opacity: 0;
+            transition: opacity 0.2s ease-in-out;
+        }
+        .resizer-visible .resizer {
+            opacity: 1;
+        }
+        .resizer.nw { top: -5px; left: -5px; cursor: nw-resize; }
+        .resizer.ne { top: -5px; right: -5px; cursor: ne-resize; }
+        .resizer.sw { bottom: -5px; left: -5px; cursor: sw-resize; }
+        .resizer.se { bottom: -5px; right: -5px; cursor: se-resize; }
+    </style>
+</head>
+<body class="bg-gray-100 flex flex-col items-center justify-center p-4 min-h-screen">
+
+    <div id="auth-info" class="mb-4 text-sm text-gray-600 flex items-center space-x-2">
+        <span>ユーザーID:</span>
+        <span id="user-id" class="font-mono bg-gray-200 p-1 rounded-md text-gray-800"></span>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-lg p-6 w-full max-w-4xl">
+        <!-- Toolbar -->
+        <div id="toolbar" class="toolbar flex flex-wrap gap-2 mb-4 p-2 bg-gray-50 rounded-lg shadow-inner">
+            <button data-cmd="bold" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300"><b>B</b></button>
+            <button data-cmd="italic" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300"><i>I</i></button>
+            <button data-cmd="underline" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300"><u>U</u></button>
+            <button data-cmd="insertUnorderedList" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300">リスト</button>
+            <button data-cmd="justifyLeft" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300">左寄せ</button>
+            <button data-cmd="justifyCenter" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300">中央揃え</button>
+            <button data-cmd="justifyRight" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300">右寄せ</button>
+            <input type="color" id="color-picker" class="p-1 rounded-md bg-gray-200 cursor-pointer" title="文字色を変更">
+            <button id="image-upload-button" class="p-2 rounded-md bg-gray-200 hover:bg-gray-300">画像アップロード</button>
+            <input type="file" id="image-upload-input" accept="image/*" class="hidden">
+            <!-- ローカルファイルからロードするボタンを追加 -->
+            <button id="load-local-button" class="p-2 rounded-md bg-purple-500 text-white hover:bg-purple-600">ファイルからロード</button>
+            <input type="file" id="load-file-input" accept=".txt,.html" class="hidden">
+            <!-- HTMLダウンロードボタンを追加 -->
+            <button id="download-html-button" class="p-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600">HTMLでダウンロード</button>
+        </div>
+
+        <!-- Document Title -->
+        <input id="document-title" type="text" placeholder="ドキュメントのタイトル" class="w-full text-2xl font-semibold mb-4 p-2 border-b border-gray-300 focus:border-blue-500 transition-colors duration-200">
+
+        <!-- Document Editor Area -->
+        <div id="document-area" contenteditable="true" class="document-area editor-container bg-white p-6 border border-gray-300 rounded-lg shadow-inner text-gray-800 focus:border-blue-500 transition-colors duration-200">
+            <p>ここに文章を入力してください。</p>
+        </div>
+
+        <div id="message-box" class="fixed bottom-4 right-4 p-4 rounded-lg shadow-lg hidden"></div>
+    </div>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set Firestore log level to debug for detailed logging
+        setLogLevel('debug');
+
+        const messageBox = document.getElementById('message-box');
+        let firebaseApp, db, auth;
+        let userId;
+        const documentId = 'my-first-document'; // Static ID for this example
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : '';
+        
+        if (firebaseConfig && Object.keys(firebaseConfig).length > 0) {
+            firebaseApp = initializeApp(firebaseConfig);
+            db = getFirestore(firebaseApp);
+            auth = getAuth(firebaseApp);
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    document.getElementById('user-id').innerText = userId;
+                    // Note: Firestore functionality is removed as per user request
+                    // listenForDocumentChanges();
+                } else {
+                    showMessage("認証が失敗しました。", "bg-red-500 text-white");
+                }
+            });
+
+            // Sign in with custom token or anonymously
+            const signIn = async () => {
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Firebase Auth Error:", error);
+                    showMessage(`認証エラー: ${error.message}`, "bg-red-500 text-white");
+                }
+            };
+            signIn();
+
+        } else {
+            console.error("Firebase config is missing.");
+            showMessage("Firebaseの設定が見つかりません。", "bg-red-500 text-white");
+        }
+
+        function showMessage(text, type) {
+            messageBox.innerText = text;
+            messageBox.className = `fixed bottom-4 right-4 p-4 rounded-lg shadow-lg transition-all duration-300 ${type}`;
+            messageBox.style.display = 'block';
+            setTimeout(() => {
+                messageBox.style.display = 'none';
+            }, 3000);
+        }
+
+        const execCmd = (cmd, value = null) => {
+            document.execCommand(cmd, false, value);
+            document.getElementById('document-area').focus();
+        };
+
+        let lastUpdateTime = 0;
+        const saveDocument = () => {
+             // Saving to Firestore is removed as per user request
+             // No need to debounce save anymore
+             // This function is still called on input to handle image wrapping, but does nothing else now.
+        };
+
+        const loadDocument = async () => {
+             // Loading from Firestore is removed as per user request
+             showMessage("クラウドからのロード機能は削除されました。", "bg-red-500 text-white");
+        };
+
+        const listenForDocumentChanges = () => {
+            // Firestore listener is removed as per user request
+        };
+        
+        // ローカルファイルからロードする機能
+        const loadLocalFile = (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const content = e.target.result;
+                const documentArea = document.getElementById('document-area');
+                documentArea.innerHTML = content;
+                showMessage("ファイルをロードしました。", "bg-green-500 text-white");
+            };
+            reader.onerror = (e) => {
+                console.error("ファイルの読み込み中にエラーが発生しました:", e);
+                showMessage("ファイルのロードエラー: " + e.message, "bg-red-500 text-white");
+            };
+            reader.readAsText(file);
+        };
+
+
+        // Wordダウンロード機能
+        const downloadDocx = () => {
+            showMessage("Wordダウンロード機能は削除されました。", "bg-red-500 text-white");
+        };
+
+        // TXTダウンロード機能
+        const downloadTxt = () => {
+            showMessage("TXTダウンロード機能は削除されました。", "bg-red-500 text-white");
+        };
+
+        // HTMLダウンロード機能
+        const downloadHtml = () => {
+            const title = document.getElementById('document-title').value || 'ドキュメント';
+            const content = document.getElementById('document-area').innerHTML;
+
+            // HTMLファイル全体を作成
+            const htmlContent = `
+                <!DOCTYPE html>
+                <html lang="ja">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>${title}</title>
+                    <style>
+                        body { font-family: sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
+                        img { max-width: 100%; height: auto; }
+                    </style>
+                </head>
+                <body>
+                    <h1>${title}</h1>
+                    ${content}
+                </body>
+                </html>
+            `;
+
+            const htmlBlob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+            const fileName = `${title}.html`;
+            saveAs(htmlBlob, fileName);
+            showMessage("ドキュメントをHTML形式でダウンロードしています...", "bg-indigo-500 text-white");
+        };
+
+        document.getElementById('document-area').addEventListener('input', saveDocument);
+        document.getElementById('document-title').addEventListener('input', saveDocument);
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            const toolbar = document.getElementById('toolbar');
+            toolbar.addEventListener('click', (event) => {
+                const button = event.target.closest('button');
+                if (button) {
+                    const cmd = button.getAttribute('data-cmd');
+                    if (cmd) {
+                        execCmd(cmd);
+                    }
+                }
+            });
+
+            // Add event listener for the color picker
+            const colorPicker = document.getElementById('color-picker');
+            colorPicker.addEventListener('input', (event) => {
+                execCmd('foreColor', event.target.value);
+            });
+
+            // Add event listeners for the image upload functionality
+            const imageUploadButton = document.getElementById('image-upload-button');
+            const imageUploadInput = document.getElementById('image-upload-input');
+
+            imageUploadButton.addEventListener('click', () => {
+                imageUploadInput.click();
+            });
+
+            imageUploadInput.addEventListener('change', (event) => {
+                const file = event.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const dataUrl = e.target.result;
+                        execCmd('insertImage', dataUrl);
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+
+            // Manual save button functionality
+            // Removed as per user request
+
+            // Add event listener for the new load button
+            // Removed as per user request
+            
+            // Add event listener for the new download button
+            // Removed as per user request
+            
+            // Add event listener for the new TXT download button
+            // Removed as per user request
+
+            // Add event listener for the new HTML download button
+            const downloadHtmlButton = document.getElementById('download-html-button');
+            downloadHtmlButton.addEventListener('click', downloadHtml);
+
+            // ローカルファイルロード用のボタンと入力要素
+            const loadLocalButton = document.getElementById('load-local-button');
+            const loadFileInput = document.getElementById('load-file-input');
+            loadLocalButton.addEventListener('click', () => {
+                loadFileInput.click();
+            });
+            loadFileInput.addEventListener('change', loadLocalFile);
+
+
+            // Image resize and drag-and-drop functionality
+            const documentArea = document.getElementById('document-area');
+            let selectedImageContainer = null;
+            let startX, startY, startWidth, startHeight;
+            let draggingElement = null;
+
+            // 新しいドラッグ＆ドロップ処理
+            // `draggable="true"`属性を持つ要素のドラッグ開始時に呼ばれる
+            documentArea.addEventListener('dragstart', (e) => {
+                if (e.target.tagName === 'IMG' && e.target.parentNode.classList.contains('image-container')) {
+                    draggingElement = e.target.parentNode;
+                    e.dataTransfer.effectAllowed = 'move';
+                    // ドラッグ中の要素を参照できるようにする
+                    e.dataTransfer.setData('text/plain', 'dragged-image-container');
+                }
+            });
+
+            // ドロップを許可するために必要
+            documentArea.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+            });
+
+            // ドロップ時に画像を挿入
+            documentArea.addEventListener('drop', (e) => {
+                e.preventDefault();
+                // ファイルアップロードからのドロップを処理
+                const file = e.dataTransfer.files[0];
+                if (file && file.type.startsWith('image/')) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const dataUrl = e.target.result;
+                        execCmd('insertImage', dataUrl);
+                    };
+                    reader.readAsDataURL(file);
+                    return; // 外部ファイルからのドロップの場合はここで終了
+                }
+
+                // エディタ内でのドラッグ＆ドロップを処理
+                if (draggingElement) {
+                    const range = document.caretRangeFromPoint(e.clientX, e.clientY);
+                    if (range) {
+                        range.insertNode(draggingElement);
+                        document.getElementById('document-area').focus();
+                    }
+                }
+                draggingElement = null; // ドラッグ状態をリセット
+                saveDocument();
+            });
+
+            // ドラッグ終了時に状態をリセット
+            documentArea.addEventListener('dragend', () => {
+                draggingElement = null;
+            });
+
+
+            // Image selection and resizer creation
+            documentArea.addEventListener('click', (e) => {
+                // Clear any previous selection
+                if (selectedImageContainer) {
+                    selectedImageContainer.classList.remove('resizer-visible');
+                    selectedImageContainer = null;
+                }
+                
+                if (e.target.tagName === 'IMG') {
+                    const image = e.target;
+                    let container = image.parentNode;
+                    if (!container.classList.contains('image-container')) {
+                        // If image is not yet wrapped, wrap it
+                        container = document.createElement('span');
+                        container.classList.add('image-container');
+                        container.setAttribute('draggable', 'true'); // 新しいドラッグ＆ドロップ用に属性を追加
+                        image.parentNode.insertBefore(container, image);
+                        container.appendChild(image);
+                    }
+                    selectedImageContainer = container;
+                    selectedImageContainer.classList.add('resizer-visible');
+                }
+            });
+
+            // Image resize logic
+            documentArea.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('resizer')) {
+                    e.preventDefault();
+                    e.stopPropagation(); // Stop event from bubbling to parent
+                    const resizer = e.target;
+                    const image = resizer.parentNode.querySelector('img');
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    startWidth = image.offsetWidth;
+                    startHeight = image.offsetHeight;
+
+                    const onMouseMove = (moveEvent) => {
+                        const dx = moveEvent.clientX - startX;
+                        const dy = moveEvent.clientY - startY;
+                        let newWidth = startWidth;
+                        let newHeight = startHeight;
+
+                        if (resizer.classList.contains('nw') || resizer.classList.contains('sw')) {
+                            newWidth = startWidth - dx;
+                        } else {
+                            newWidth = startWidth + dx;
+                        }
+
+                        if (resizer.classList.contains('nw') || resizer.classList.contains('ne')) {
+                            newHeight = startHeight - dy;
+                        } else {
+                            newHeight = startHeight + dy;
+                        }
+
+                        // Maintain aspect ratio
+                        const aspectRatio = startWidth / startHeight;
+                        image.style.width = newWidth + 'px';
+                        image.style.height = (newWidth / aspectRatio) + 'px';
+                    };
+
+                    const onMouseUp = () => {
+                        window.removeEventListener('mousemove', onMouseMove);
+                        window.removeEventListener('mouseup', onMouseUp);
+                        saveDocument(); // Save changes after resize
+                    };
+
+                    window.addEventListener('mousemove', onMouseMove);
+                    window.addEventListener('mouseup', onMouseUp);
+                }
+            });
+
+            // Focus on the editor when the page loads
+            document.getElementById('document-area').focus();
+        });
+    </script>
+</body>
+</html>
